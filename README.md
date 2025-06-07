@@ -2,6 +2,8 @@
 
 A Visual Studio Code extension that provides a graphical interface for viewing and managing Task Master tasks directly within VS Code.
 
+![alt text](image.png)
+
 ## Features
 
 - **📋 Task Tree View**: Display all Task Master tasks in an organized tree structure within the Explorer sidebar
