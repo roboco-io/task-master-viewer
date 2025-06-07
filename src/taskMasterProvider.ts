@@ -9,18 +9,28 @@ export interface Task {
     status: 'pending' | 'in-progress' | 'completed' | 'blocked';
     priority?: 'low' | 'medium' | 'high' | 'critical';
     dependencies?: string[];
+    subtasks?: Task[];
     file?: string;
 }
 
 export class TaskItem extends vscode.TreeItem {
     constructor(
         public readonly task: Task,
-        public readonly collapsibleState: vscode.TreeItemCollapsibleState
+        public readonly collapsibleState: vscode.TreeItemCollapsibleState,
+        public readonly isSubtask: boolean = false
     ) {
-        super(task.title, collapsibleState);
+        super(`${task.id}. ${task.title}`, collapsibleState);
         this.tooltip = this.task.description || this.task.title;
         this.description = `[${this.task.status}]${this.task.priority ? ` - ${this.task.priority}` : ''}`;
         this.contextValue = 'task';
+        
+        // Add click command to open task file
+        const taskFileName = `task_${String(this.task.id).padStart(3, '0')}.txt`;
+        this.command = {
+            command: 'task-master-viewer.openTaskFile',
+            title: 'Open Task File',
+            arguments: [this.task.id, taskFileName]
+        };
         
         switch (this.task.status) {
             case 'completed':
@@ -38,14 +48,18 @@ export class TaskItem extends vscode.TreeItem {
     }
 }
 
+export type SortOrder = 'id' | 'priority' | 'status' | 'title';
+
 export class TaskMasterProvider implements vscode.TreeDataProvider<TaskItem> {
     private _onDidChangeTreeData: vscode.EventEmitter<TaskItem | undefined | null | void> = new vscode.EventEmitter<TaskItem | undefined | null | void>();
     readonly onDidChangeTreeData: vscode.Event<TaskItem | undefined | null | void> = this._onDidChangeTreeData.event;
 
     private tasks: Task[] = [];
     private watcher: vscode.FileSystemWatcher | undefined;
+    private currentSortOrder: SortOrder = 'id';
 
     constructor(private context: vscode.ExtensionContext) {
+        this.loadTasks();
         this.watchTaskMasterFiles();
     }
 
@@ -65,6 +79,54 @@ export class TaskMasterProvider implements vscode.TreeDataProvider<TaskItem> {
         this._onDidChangeTreeData.fire();
     }
 
+    setSortOrder(sortOrder: SortOrder): void {
+        this.currentSortOrder = sortOrder;
+        this.sortTasks();
+        this._onDidChangeTreeData.fire();
+    }
+
+    getSortOrder(): SortOrder {
+        return this.currentSortOrder;
+    }
+
+    private sortTasks(): void {
+        this.tasks.sort((a, b) => this.compareTasksBySortOrder(a, b));
+        
+        // Also sort subtasks
+        this.tasks.forEach(task => {
+            if (task.subtasks) {
+                task.subtasks.sort((a, b) => this.compareTasksBySortOrder(a, b));
+            }
+        });
+    }
+
+    private compareTasksBySortOrder(a: Task, b: Task): number {
+        switch (this.currentSortOrder) {
+            case 'id':
+                const aId = parseInt(a.id.toString());
+                const bId = parseInt(b.id.toString());
+                return aId - bId;
+            
+            case 'priority':
+                const priorityOrder = { 'critical': 0, 'high': 1, 'medium': 2, 'low': 3 };
+                const aPriority = priorityOrder[a.priority || 'medium'];
+                const bPriority = priorityOrder[b.priority || 'medium'];
+                return aPriority - bPriority;
+            
+            case 'status':
+                const statusOrder = { 'in-progress': 0, 'pending': 1, 'blocked': 2, 'completed': 3 };
+                const aStatus = statusOrder[a.status || 'pending'];
+                const bStatus = statusOrder[b.status || 'pending'];
+                return aStatus - bStatus;
+            
+            case 'title':
+                return a.title.localeCompare(b.title);
+            
+            default:
+                return 0;
+        }
+    }
+
     getTreeItem(element: TaskItem): vscode.TreeItem {
         return element;
     }
@@ -76,12 +138,29 @@ export class TaskMasterProvider implements vscode.TreeDataProvider<TaskItem> {
         }
 
         if (element) {
+            // Return subtasks if this element has them
+            if (element.task.subtasks && element.task.subtasks.length > 0) {
+                return Promise.resolve(element.task.subtasks.map(subtask => 
+                    new TaskItem(
+                        subtask, 
+                        subtask.subtasks && subtask.subtasks.length > 0 
+                            ? vscode.TreeItemCollapsibleState.Collapsed 
+                            : vscode.TreeItemCollapsibleState.None,
+                        true // isSubtask
+                    )
+                ));
+            }
             return Promise.resolve([]);
         } else {
             console.log('getChildren - Total tasks:', this.tasks.length);
             console.log('getChildren - Tasks:', this.tasks);
             return Promise.resolve(this.tasks.map(task => 
-                new TaskItem(task, vscode.TreeItemCollapsibleState.None)
+                new TaskItem(
+                    task, 
+                    task.subtasks && task.subtasks.length > 0 
+                        ? vscode.TreeItemCollapsibleState.Collapsed 
+                        : vscode.TreeItemCollapsibleState.None
+                )
             ));
         }
     }
@@ -97,7 +176,6 @@ export class TaskMasterProvider implements vscode.TreeDataProvider<TaskItem> {
         const taskMasterDir = path.join(workspaceRoot, '.taskmaster');
         
         console.log('Loading tasks from:', taskMasterDir);
-        vscode.window.showInformationMessage(`Loading tasks from: ${taskMasterDir}`);
         
         if (!fs.existsSync(taskMasterDir)) {
             console.log('Task Master directory not found:', taskMasterDir);
@@ -112,22 +190,33 @@ export class TaskMasterProvider implements vscode.TreeDataProvider<TaskItem> {
                 try {
                     const content = fs.readFileSync(file, 'utf-8');
                     console.log(`Reading file ${file}:`, content.substring(0, 100));
-                    const task = this.parseTaskFile(content, file);
-                    if (task) {
-                        console.log('Parsed task:', task);
-                        this.tasks.push(task);
+                    
+                    // Handle tasks.json file specially
+                    if (path.basename(file) === 'tasks.json') {
+                        const tasksData = JSON.parse(content);
+                        if (Array.isArray(tasksData.tasks)) {
+                            console.log(`Processing tasks.json with ${tasksData.tasks.length} tasks`);
+                            tasksData.tasks.forEach((taskData: any) => {
+                                const task = this.parseTaskData(taskData, file);
+                                if (task) {
+                                    console.log('Parsed task from tasks.json:', task);
+                                    this.tasks.push(task);
+                                }
+                            });
+                        }
+                    } else {
+                        const task = this.parseTaskFile(content, file);
+                        if (task) {
+                            console.log('Parsed task:', task);
+                            this.tasks.push(task);
+                        }
                     }
                 } catch (error) {
                     console.error(`Error reading task file ${file}:`, error);
                 }
             }
             
-            this.tasks.sort((a, b) => {
-                const priorityOrder = { 'critical': 0, 'high': 1, 'medium': 2, 'low': 3 };
-                const aPriority = priorityOrder[a.priority || 'medium'];
-                const bPriority = priorityOrder[b.priority || 'medium'];
-                return aPriority - bPriority;
-            });
+            this.sortTasks();
         } catch (error) {
             console.error('Error loading tasks:', error);
         }
@@ -142,13 +231,47 @@ export class TaskMasterProvider implements vscode.TreeDataProvider<TaskItem> {
             const fullPath = path.join(dir, entry.name);
             
             if (entry.isDirectory()) {
-                files.push(...await this.findTaskFiles(fullPath));
+                // Skip directories named 'config' or 'settings'
+                if (!['config', 'settings', '.git'].includes(entry.name)) {
+                    files.push(...await this.findTaskFiles(fullPath));
+                }
             } else if (entry.isFile() && (entry.name.endsWith('.md') || entry.name.endsWith('.json'))) {
-                files.push(fullPath);
+                // Skip common configuration files (but include tasks.json)
+                const skipFiles = ['config.json', 'settings.json', '.taskmaster.json', 'README.md'];
+                if (!skipFiles.includes(entry.name)) {
+                    files.push(fullPath);
+                }
             }
         }
         
         return files;
+    }
+
+    private parseTaskData(taskData: any, filePath: string): Task | null {
+        try {
+            const task: Task = {
+                id: taskData.id?.toString() || 'unknown',
+                title: taskData.title || 'Untitled Task',
+                description: taskData.description || taskData.details,
+                status: (taskData.status || 'pending').toLowerCase() as Task['status'],
+                priority: taskData.priority?.toLowerCase() as Task['priority'],
+                dependencies: taskData.dependencies,
+                file: filePath
+            };
+
+            // Parse subtasks if they exist
+            if (Array.isArray(taskData.subtasks) && taskData.subtasks.length > 0) {
+                task.subtasks = taskData.subtasks.map((subtaskData: any) => 
+                    this.parseTaskData(subtaskData, filePath)
+                ).filter((subtask: Task | null) => subtask !== null);
+                
+            }
+
+            return task;
+        } catch (error) {
+            console.error('Error parsing task data:', error);
+            return null;
+        }
     }
 
     private parseTaskFile(content: string, filePath: string): Task | null {
@@ -158,41 +281,81 @@ export class TaskMasterProvider implements vscode.TreeDataProvider<TaskItem> {
         if (fileExt === '.json') {
             try {
                 const data = JSON.parse(content);
+                
+                // Check if this is actually a task file (has required fields)
+                if (!data.title && !data.name && !data.task) {
+                    console.log(`Skipping non-task JSON file: ${fileName}`);
+                    return null;
+                }
+                
+                // Handle different JSON structures
+                let taskData = data;
+                
+                // If the JSON has a 'task' property, use that
+                if (data.task && typeof data.task === 'object') {
+                    taskData = data.task;
+                }
+                
+                // If the JSON has 'tasks' array, skip it (it's a collection file)
+                if (Array.isArray(data.tasks)) {
+                    console.log(`Skipping tasks collection file: ${fileName}`);
+                    return null;
+                }
+                
                 return {
-                    id: data.id || fileName,
-                    title: data.title || data.name || fileName,
-                    description: data.description,
-                    status: data.status || 'pending',
-                    priority: data.priority,
-                    dependencies: data.dependencies,
+                    id: taskData.id || fileName.replace('.json', ''),
+                    title: taskData.title || taskData.name || fileName.replace('.json', ''),
+                    description: taskData.description || taskData.details,
+                    status: (taskData.status || 'pending').toLowerCase() as Task['status'],
+                    priority: taskData.priority?.toLowerCase() as Task['priority'],
+                    dependencies: taskData.dependencies || taskData.depends_on,
                     file: filePath
                 };
             } catch (error) {
-                console.error('Error parsing JSON task file:', error);
+                console.error(`Error parsing JSON task file ${fileName}:`, error);
+                return null;
             }
         } else if (fileExt === '.md') {
             const lines = content.split('\n');
             const task: Task = {
-                id: fileName,
+                id: fileName.replace('.md', ''),
                 title: fileName.replace('.md', ''),
                 status: 'pending',
                 file: filePath
             };
             
-            for (const line of lines) {
+            // Parse markdown content
+            let inDescription = false;
+            let description: string[] = [];
+            
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i];
+                
                 if (line.startsWith('# ')) {
                     task.title = line.substring(2).trim();
-                } else if (line.toLowerCase().includes('status:')) {
-                    const status = line.split(':')[1].trim().toLowerCase();
+                    inDescription = true;
+                } else if (line.toLowerCase().startsWith('status:')) {
+                    const status = line.substring(7).trim().toLowerCase();
                     if (['pending', 'in-progress', 'completed', 'blocked'].includes(status)) {
                         task.status = status as Task['status'];
                     }
-                } else if (line.toLowerCase().includes('priority:')) {
-                    const priority = line.split(':')[1].trim().toLowerCase();
+                    inDescription = false;
+                } else if (line.toLowerCase().startsWith('priority:')) {
+                    const priority = line.substring(9).trim().toLowerCase();
                     if (['low', 'medium', 'high', 'critical'].includes(priority)) {
                         task.priority = priority as Task['priority'];
                     }
+                    inDescription = false;
+                } else if (line.toLowerCase().startsWith('id:')) {
+                    task.id = line.substring(3).trim();
+                    inDescription = false;
+                } else if (inDescription && line.trim() && !line.startsWith('#')) {
+                    description.push(line.trim());
                 }
+            }
+            
+            if (description.length > 0) {
+                task.description = description.join(' ').substring(0, 100);
             }
             
             return task;
