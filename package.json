@@ -1,0 +1,70 @@
+{
+  "name": "task-master-viewer",
+  "displayName": "Task Master Viewer",
+  "description": "View and manage Task Master tasks in VS Code",
+  "version": "0.0.1",
+  "publisher": "task-master-developer",
+  "engines": {
+    "vscode": "^1.74.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": [
+    "onView:taskMasterViewer"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "task-master-viewer.refreshTasks",
+        "title": "Task Master: Refresh Tasks",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "task-master-viewer.updateTaskStatus",
+        "title": "Task Master: Update Status"
+      }
+    ],
+    "views": {
+      "explorer": [
+        {
+          "id": "taskMasterViewer",
+          "name": "Task Master",
+          "icon": "$(checklist)",
+          "contextualTitle": "Task Master Viewer"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "task-master-viewer.refreshTasks",
+          "when": "view == taskMasterViewer",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "task-master-viewer.updateTaskStatus",
+          "when": "view == taskMasterViewer && viewItem == task"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src --ext ts",
+    "test": "node ./out/test/runTest.js"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.74.0",
+    "@types/node": "16.x",
+    "@typescript-eslint/eslint-plugin": "^5.45.0",
+    "@typescript-eslint/parser": "^5.45.0",
+    "eslint": "^8.28.0",
+    "glob": "^8.0.3",
+    "typescript": "^4.9.3"
+  }
+}
