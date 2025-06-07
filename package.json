@@ -2,7 +2,7 @@
   "name": "task-master-viewer",
   "displayName": "Task Master Viewer",
   "description": "View and manage Task Master tasks in VS Code",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "publisher": "task-master-developer",
   "repository": {
     "type": "git",
